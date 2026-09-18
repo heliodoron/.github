@@ -1,0 +1,116 @@
+name: shared-checks
+
+# Reusable workflow: the checks every Heliodoron repository runs on each pull
+# request and on main. Called from a short `checks.yml` in each repository,
+# pinned to a commit SHA. The standard it enforces is in CONTRIBUTING.md.
+
+on:
+  workflow_call:
+    inputs:
+      typography-skip:
+        description: Extra git pathspecs to skip in the typographic character check, space separated. Pass an empty string for none.
+        type: string
+        required: true
+      large-file-allow:
+        description: Tracked paths allowed to exceed 5 MB, space separated. Pass an empty string for none.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pull request title follows the standard
+        if: github.event_name == 'pull_request'
+        env:
+          # The title is untrusted input: it reaches the script as an
+          # environment variable, never through expression interpolation.
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          pattern='^(feat|fix|docs|refactor|chore|test|perf)(\([a-z0-9._-]+\))?: [a-z0-9].{1,70}[^.]$'
+          if ! [[ "$TITLE" =~ $pattern ]]; then
+            echo "Title does not follow CONTRIBUTING.md: $TITLE" >&2
+            echo "Want: <type>(<scope>)?: <3 to 72 characters, lowercase or digit first, no full stop at the end>" >&2
+            exit 1
+          fi
+
+      - name: No typographic characters
+        env:
+          TYPOGRAPHY_SKIP: ${{ inputs.typography-skip }}
+        run: |
+          set -euo pipefail
+          # Dashes, minus sign, non-breaking hyphen, curly and low quotes,
+          # primes, special and zero-width spaces, ellipsis, bullets, middle
+          # dot, arrows. Written as escapes so this file stays ASCII.
+          class='[\x{2014}\x{2013}\x{2212}\x{2011}\x{2018}\x{2019}\x{201C}\x{201D}\x{201E}\x{201A}\x{2032}\x{2033}\x{00A0}\x{202F}\x{2009}\x{200B}\x{200C}\x{200D}\x{FEFF}\x{3000}\x{2026}\x{2022}\x{2023}\x{25E6}\x{2043}\x{00B7}\x{2190}-\x{21FF}]'
+          skip=(':!:LICENSE' ':!:CODE_OF_CONDUCT.md' ':!:*.lock' ':!:*.lock.hcl' ':!:package-lock.json' ':!:*.ipynb' ':!:*.csv' ':!:*.tsv' ':!:*.json' ':!:*.jsonl' ':!:*.svg' ':!:*.cast')
+          read -r -a extra <<< "$TYPOGRAPHY_SKIP"
+          for p in "${extra[@]}"; do skip+=(":!:$p"); done
+          found=0
+          while IFS= read -r -d '' f; do
+            # grep exit codes: 0 match, 1 no match, 2 or more is an error.
+            if LC_ALL=C.UTF-8 grep -nIHP -- "$class" "$f"; then
+              found=1
+            else
+              rc=$?
+              if [[ "$rc" -ne 1 ]]; then
+                echo "grep failed on $f with exit code $rc" >&2
+                exit 2
+              fi
+            fi
+          done < <(git ls-files -z -- . "${skip[@]}")
+          if [[ "$found" -eq 1 ]]; then
+            echo "Typographic characters found. Use ASCII punctuation (CONTRIBUTING.md, Writing)." >&2
+            exit 1
+          fi
+
+      - name: No forbidden files
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r -d '' f; do
+            base="${f##*/}"
+            case "$f" in
+              _private/*|*/_private/*)
+                [[ "$base" == ".gitkeep" ]] || { echo "Tracked under a _private folder: $f" >&2; found=1; } ;;
+            esac
+            case "$base" in
+              .env.example|.env.sample|.env.template) ;;
+              .env|.env.*) echo "Tracked environment file: $f" >&2; found=1 ;;
+              *.pem|*.key) echo "Tracked key file: $f" >&2; found=1 ;;
+              *.tfstate|*.tfstate.*) echo "Tracked Terraform state: $f" >&2; found=1 ;;
+              *.tfvars|*.tfvars.json) echo "Tracked Terraform variables file: $f" >&2; found=1 ;;
+            esac
+          done < <(git ls-files -z)
+          [[ "$found" -eq 0 ]] || exit 1
+
+      - name: No large files
+        env:
+          LARGE_FILE_ALLOW: ${{ inputs.large-file-allow }}
+        run: |
+          set -euo pipefail
+          limit=$((5 * 1024 * 1024))
+          read -r -a allow <<< "$LARGE_FILE_ALLOW"
+          found=0
+          while IFS= read -r -d '' f; do
+            [[ -f "$f" ]] || continue   # a tracked symlink or submodule entry has no size to check
+            size="$(stat -c %s -- "$f")"
+            if [[ "$size" -gt "$limit" ]]; then
+              allowed=0
+              for a in "${allow[@]}"; do [[ "$a" == "$f" ]] && allowed=1; done
+              if [[ "$allowed" -eq 0 ]]; then
+                echo "Tracked file over 5 MB: $f ($size bytes)" >&2
+                found=1
+              fi
+            fi
+          done < <(git ls-files -z)
+          [[ "$found" -eq 0 ]] || exit 1

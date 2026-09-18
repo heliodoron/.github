@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # Keeps the SHA pins of the actions used by the workflows current.
+  # Package ecosystems are deliberately not listed: see CONTRIBUTING.md.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore

@@ -1,0 +1,24 @@
+name: checks
+
+# This repository runs its own shared checks from the working tree, so a
+# change to the checks is tested by the pull request that makes it.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    uses: ./.github/workflows/shared-checks.yml
+    with:
+      typography-skip: ""
+      large-file-allow: ""

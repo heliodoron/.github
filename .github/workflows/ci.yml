@@ -1,0 +1,74 @@
+name: ci
+
+# This repository's own CI: lint the workflows and the scripts. The ruleset
+# on main requires the single status `ci`, reported by the gate job below.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflows:
+    name: lint workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint at a pinned version
+        env:
+          VERSION: 1.7.12
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz"
+          echo "${SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+      - name: Lint the workflows
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/actionlint" -color
+
+  scripts:
+    name: lint scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the scripts and hooks
+        run: |
+          set -euo pipefail
+          mapfile -d '' files < <(git ls-files -z -- 'scripts/*.sh' '.githooks/*')
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "No scripts or hooks are tracked: the hooks at least must exist" >&2
+            exit 1
+          fi
+          shellcheck "${files[@]}"
+
+  ci:
+    name: ci
+    # always() so that a failed or skipped job fails the gate instead of
+    # skipping it: a skipped required status counts as passing.
+    if: always()
+    needs: [workflows, scripts]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every required job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          read -r -a results <<< "$RESULTS"
+          for r in "${results[@]}"; do
+            [[ "$r" == "success" ]] || { echo "A required job ended with: $r" >&2; exit 1; }
+          done
